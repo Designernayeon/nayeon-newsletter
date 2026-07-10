@@ -1,0 +1,114 @@
+name: Daily English AI Newsletter Generate + Deploy
+
+on:
+  schedule:
+    # Start generation every day at 06:15 KST, leaving time before the 07:00 send.
+    - cron: "15 6 * * *"
+      timezone: "Asia/Seoul"
+  workflow_dispatch:
+    inputs:
+      fetch_images:
+        description: "Fetch article preview images"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  generate-build-deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: automation/requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r automation/requirements.txt
+
+      - name: Generate today's English AI briefing
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL: claude-sonnet-4-6
+        run: python automation/generate.py ai-briefing
+
+      - name: Build website, email HTML, and RSS feed
+        env:
+          FETCH_IMAGES: ${{ inputs.fetch_images || 'true' }}
+        run: python automation/build_site.py
+
+      - name: Validate generated feed
+        run: |
+          python - <<'PY'
+          import pathlib, xml.etree.ElementTree as ET
+          feed = pathlib.Path('feeds/ai-briefing.xml')
+          assert feed.exists(), 'RSS feed was not generated'
+          ET.parse(feed)
+          print('RSS OK:', feed)
+          PY
+
+      - name: Commit generated content
+        run: |
+          git config user.name "nayeon-newsletter-bot"
+          git config user.email "designaistudio2+bot@users.noreply.github.com"
+          git add out/ newsletters/ feeds/ issues.json
+          if git diff --cached --quiet; then
+            echo "No generated changes to commit."
+          else
+            git commit -m "publish: daily English AI briefing $(TZ=Asia/Seoul date +'%Y-%m-%d')"
+            git push
+          fi
+
+      - name: Prepare public Pages artifact
+        run: |
+          rm -rf _site
+          mkdir -p _site
+          cp index.html style.css issues.json _site/
+          touch _site/.nojekyll
+          [ -d newsletters ] && cp -R newsletters _site/
+          [ -d feeds ] && cp -R feeds _site/
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: "_site"
+
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
+
+      - name: Optional Beehiiv Enterprise auto-send
+        env:
+          BEEHIIV_AUTO_SEND: ${{ secrets.BEEHIIV_AUTO_SEND }}
+          BEEHIIV_API_KEY: ${{ secrets.BEEHIIV_API_KEY }}
+          BEEHIIV_PUBLICATION_ID: ${{ secrets.BEEHIIV_PUBLICATION_ID }}
+          BEEHIIV_NEWSLETTER_LIST_ID: ${{ secrets.BEEHIIV_NEWSLETTER_LIST_ID }}
+        run: |
+          if [ "$BEEHIIV_AUTO_SEND" = "true" ]; then
+            python automation/publish_beehiiv_enterprise.py
+          else
+            echo "Beehiiv Enterprise auto-send is disabled. English RSS and email HTML were generated."
+          fi

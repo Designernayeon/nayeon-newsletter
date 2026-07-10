@@ -1,100 +1,112 @@
 # -*- coding: utf-8 -*-
-"""
-generate.py — Claude API(웹 검색 포함)로 오늘자 뉴스레터 콘텐츠를 JSON으로 생성.
+"""Generate today's English AI newsletter JSON with Claude web search."""
+from __future__ import annotations
 
-사용법:
-    python generate.py                # 오늘 발행 대상 전체 (수요일이면 3종, 아니면 2종)
-    python generate.py economics      # 특정 뉴스레터만
-출력:
-    out/content_<slug>_<YYYY-MM-DD>.json
-필요 환경변수:
-    ANTHROPIC_API_KEY
-"""
-import json, os, re, sys, datetime
+import datetime as dt
+import json
+import os
+import re
+import sys
+from pathlib import Path
 from zoneinfo import ZoneInfo
+
 import anthropic
-from config import NEWSLETTERS, SITE_NAME, EDITORIAL_RULES
 
+from config import DEFAULT_MODEL, EDITORIAL_RULES, NEWSLETTERS, SITE_NAME
+
+ROOT = Path(__file__).resolve().parents[1]
+OUT = ROOT / "out"
 KST = ZoneInfo("Asia/Seoul")
-OUT = os.path.join(os.path.dirname(__file__), "..", "out")
 
 
-def today():
-    return datetime.datetime.now(KST)
+def now_kst() -> dt.datetime:
+    return dt.datetime.now(KST)
 
 
-def due_today(slug: str, now=None) -> bool:
-    now = now or today()
-    sched = NEWSLETTERS[slug]["schedule"]
-    return sched == "daily" or (sched == "wednesday" and now.weekday() == 2)
+def fill_prompt(prompt: str, now: dt.datetime) -> str:
+    return (
+        prompt.replace("{date}", now.strftime("%Y-%m-%d"))
+        .replace("{date_long}", now.strftime("%B %d, %Y"))
+    )
 
 
-def _fill(prompt: str, now) -> str:
-    week_of_month = (now.day - 1) // 7 + 1
-    return (prompt
-            .replace("{date}", now.strftime("%Y-%m-%d"))
-            .replace("{date_kr}", f"{now.year}년 {now.month}월 {now.day}일")
-            .replace("{yy}", now.strftime("%y"))
-            .replace("{m}", str(now.month))
-            .replace("{w}", str(week_of_month)))
-
-
-def _extract_json(text: str) -> dict:
-    """모델 응답에서 첫 번째 완전한 JSON 오브젝트를 추출."""
-    text = re.sub(r"^```(json)?|```$", "", text.strip(), flags=re.M)
+def extract_json(text: str) -> dict:
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.I | re.M)
     start = text.find("{")
-    if start == -1:
-        raise ValueError("응답에 JSON이 없습니다.")
+    if start < 0:
+        raise ValueError("Could not find the start of a JSON object in the model response.")
     depth = 0
-    for i, ch in enumerate(text[start:], start):
-        if ch == "{":
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text[start:], start=start):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
             depth += 1
-        elif ch == "}":
+        elif char == "}":
             depth -= 1
             if depth == 0:
-                return json.loads(text[start:i + 1])
-    raise ValueError("JSON이 중간에 끊겼습니다.")
+                return json.loads(text[start : index + 1])
+    raise ValueError("The JSON object in the model response was incomplete.")
 
 
-def generate(slug: str, now=None) -> str:
-    now = now or today()
-    nl = NEWSLETTERS[slug]
-    client = anthropic.Anthropic()  # ANTHROPIC_API_KEY 사용
+def validate(data: dict, minimum_items: int) -> None:
+    if not isinstance(data.get("title"), str) or not data["title"].strip():
+        raise ValueError("The issue title is missing.")
+    if not isinstance(data.get("intro"), str) or not data["intro"].strip():
+        raise ValueError("The issue introduction is missing.")
+    items = data.get("items")
+    if not isinstance(items, list) or len(items) < minimum_items:
+        raise ValueError(f"At least {minimum_items} newsletter items are required.")
+    for index, item in enumerate(items, start=1):
+        link = str(item.get("link", ""))
+        if not link.startswith(("https://", "http://")):
+            raise ValueError(f"Item {index} has an invalid source URL: {link}")
+        for key in ("category", "headline", "summary"):
+            if not isinstance(item.get(key), str) or not item[key].strip():
+                raise ValueError(f"Item {index} is missing a valid '{key}' value.")
 
-    system = EDITORIAL_RULES.format(site_name=SITE_NAME, date=now.strftime("%Y-%m-%d"))
-    print(f"[generate] {slug} … 웹 검색 기반 생성 시작")
 
-    resp = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=12000,
-        system=system,
-        tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 10}],
-        messages=[{"role": "user", "content": _fill(nl["prompt"], now)}],
+def generate(slug: str = "ai-briefing", when: dt.datetime | None = None) -> Path:
+    when = when or now_kst()
+    definition = NEWSLETTERS[slug]
+    model = os.getenv("ANTHROPIC_MODEL", DEFAULT_MODEL)
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        raise SystemExit("ANTHROPIC_API_KEY is not configured.")
+    client = anthropic.Anthropic(api_key=api_key)
+
+    response = client.messages.create(
+        model=model,
+        max_tokens=10000,
+        system=EDITORIAL_RULES.format(site_name=SITE_NAME, date=when.strftime("%Y-%m-%d")),
+        tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 12}],
+        messages=[{"role": "user", "content": fill_prompt(definition["prompt"], when)}],
     )
-    text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
-    data = _extract_json(text)
-
-    # 최소 검증
-    assert data.get("title"), "title 누락"
-    assert len(data.get("items", [])) >= 1, "items 비어 있음"
-    for it in data["items"]:
-        if not str(it.get("link", "")).startswith("http"):
-            it["link"] = ("https://news.google.com/search?q="
-                          + re.sub(r"\s+", "+", it.get("title_en") or it.get("title_ko", "")))
-
+    text = "".join(block.text for block in response.content if getattr(block, "type", "") == "text")
+    data = extract_json(text)
+    validate(data, definition["items_min"])
     data["slug"] = slug
-    data["date"] = now.strftime("%Y-%m-%d")
-    os.makedirs(OUT, exist_ok=True)
-    path = os.path.join(OUT, f"content_{slug}_{data['date']}.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    print(f"[generate] 저장: {path} (items: {len(data['items'])})")
-    return path
+    data["date"] = when.strftime("%Y-%m-%d")
+
+    OUT.mkdir(parents=True, exist_ok=True)
+    output = OUT / f"content_{slug}_{data['date']}.json"
+    output.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[generate] {output} ({len(data['items'])} items, model={model})")
+    return output
 
 
 if __name__ == "__main__":
-    targets = sys.argv[1:] or [s for s in NEWSLETTERS if due_today(s)]
-    if not targets:
-        print("[generate] 오늘 발행할 뉴스레터가 없습니다.")
-    for slug in targets:
-        generate(slug)
+    targets = sys.argv[1:] or ["ai-briefing"]
+    for target in targets:
+        if target not in NEWSLETTERS:
+            raise SystemExit(f"Unsupported newsletter: {target}")
+        generate(target)

@@ -1,0 +1,7 @@
+Upload the following items to the root of your GitHub repository:
+
+.github/
+automation/
+SETUP_AUTOMATION_EN.md
+
+Do not delete the existing index.html, style.css, or issues.json files.
