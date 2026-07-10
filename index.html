@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,600;0,700;1,500;1,600&family=Noto+Sans+KR:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div class="page-shell">
@@ -203,7 +203,7 @@ const META = {
   "ai-briefing": {label:"AI Global News Briefing", cls:"ai-card", icon:"AI NEWS"},
   "success-stories": {label:"Weekly AI Success Stories", cls:"success-card", icon:"SUCCESS"}
 };
-fetch('data/issues.json').then(r => r.json()).then(issues => {
+fetch('issues.json').then(r => r.json()).then(issues => {
   if (!issues.length) return;
   const grid = document.getElementById('news-grid');
   grid.innerHTML = issues.slice(0, 6).map(i => `
